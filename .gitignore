@@ -152,3 +152,4 @@ mmaction/.mim
 
 # others
 *.pt
+weights/

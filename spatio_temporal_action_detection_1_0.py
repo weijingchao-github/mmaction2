@@ -210,25 +210,29 @@ class VideoMAE:
                 os.path.dirname(__file__),
                 "weights/vit-base-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb_20230314-3dafab75.pth",
             ),
-            action_score_thr=0.5,
             label_map=os.path.join(
-                os.path.dirname(__file__), "tools/data/ava/label_map_Chinese_80.txt"
+                os.path.dirname(__file__),
+                # "tools/data/ava/label_map_Chinese_80.txt",
+                "tools/data/ava/label_map_Chinese_part.txt",
+                # os.path.dirname(__file__),
+                # "tools/data/ava/label_map.txt",
             ),
             device="cuda:0",
             short_side=256,
+            action_score_thr=0.3,
         )
         recording_seconds = rospy.get_param("/history_record_seconds")
         self.duration = rospy.get_param("/llm_inferecnce_duration")
         self.recording_counts = int(recording_seconds / self.duration)
         audio_image_pub_frequency = rospy.get_param("/pub_frequency")
-        self.per_seq_recv_times = self.duration * audio_image_pub_frequency
+        self.per_seq_recv_times = int(self.duration * audio_image_pub_frequency)
         self.recv_msg_buffer = deque(maxlen=self.per_seq_recv_times)
         # self.central_index = self.per_seq_recv_times // 2
         self.recv_counter = 0
         self.recv_msg_buffer_copy = None
         self.do_STAD_flag = False
         self.seq_id = -1
-        self.enable_visualization = False
+        self.viz_flag = False
         # currently recorder don't need to init
         # model init
         self.config = mmengine.Config.fromfile(self.algs_args.config)
@@ -271,7 +275,7 @@ class VideoMAE:
         person_detect_result_processed["color_image"] = self.bridge.imgmsg_to_cv2(
             person_detect_result.color_image, desired_encoding="bgr8"
         )
-        self.recv_msg_buffer.append(person_detect_result)
+        self.recv_msg_buffer.append(person_detect_result_processed)
         self.recv_counter += 1
         if self.recv_counter == self.per_seq_recv_times:
             self.recv_msg_buffer_copy = copy.deepcopy(self.recv_msg_buffer)
@@ -281,9 +285,9 @@ class VideoMAE:
 
     def _pipeline(self):
         while self.thread_running:
-            if self.do_STAD_flag:
+            if not self.do_STAD_flag:
+                time.sleep(0.001)
                 continue
-
             self.do_STAD_flag = False
 
             STAD_result = STADResult()
@@ -329,9 +333,8 @@ class VideoMAE:
                 humans_detect_result_xyxy[:, :4]
             ).to(self.algs_args.device)
 
-            # 针对目前45张的情况，提取16张
-            images_detect = (frames[::3]).extend(frames[-1])
-
+            # 针对目前48张的情况，提取16张
+            images_detect = frames[2::3]
             _ = [
                 mmcv.imnormalize_(image_detect, **self.img_norm_cfg)
                 for image_detect in images_detect
@@ -359,6 +362,21 @@ class VideoMAE:
                             prediction[j].append(
                                 (self.label_map[i], scores[j, i].item())
                             )
+                for prediction_one_person in prediction:
+                    sit_score = -1
+                    stand_score = -1
+                    for label in prediction_one_person:
+                        if label[0] == "坐":
+                            sit_score = label[1]
+                        if label[0] == "站立":
+                            stand_score = label[1]
+                    if sit_score == -1 or stand_score == -1:
+                        continue
+                    else:
+                        if sit_score > stand_score:
+                            prediction_one_person.remove(("站立", stand_score))
+                        else:
+                            prediction_one_person.remove(("坐", sit_score))
             # manage recorder
             for index, bbox_xyxy_and_id in enumerate(
                 current_person_bboxes_xyxy_and_ids
@@ -433,7 +451,7 @@ class VideoMAE:
                 STAD_result.person_action_pair.append(person_action_pair)
             self.pub_SATD_result.publish(STAD_result)
 
-            if self.enable_visualization:
+            if self.viz_flag:
                 stad_result = pack_result(
                     humans_detect_result_xyxy, prediction, new_h, new_w
                 )
@@ -441,6 +459,27 @@ class VideoMAE:
                 image_viz = visualize(image_viz, stad_result)
                 cv2.imshow("image_viz", image_viz)
                 cv2.waitKey(1)
+                current_person_str = "Current person: "
+                current_person_and_action = STAD_result.current_person_and_action
+                for person_action in current_person_and_action:
+                    current_person_str += (
+                        f"{person_action.track_id}-{person_action.action_type}, "
+                    )
+                print(current_person_str)
+                person_action_history = "History:\n"
+                person_action_pair = STAD_result.person_action_pair
+                for person_action in person_action_pair:
+                    person_action_history += f"{person_action.track_id}: "
+                    for start_time, end_time, action_type in zip(
+                        person_action.start_time,
+                        person_action.end_time,
+                        person_action.action_type,
+                    ):
+                        person_action_history += (
+                            f"{action_type} at {start_time}s-{end_time}s, "
+                        )
+                    person_action_history += "\n"
+                print(person_action_history)
                 if enable_record_video:
                     video_writer.write(image_viz)
 
