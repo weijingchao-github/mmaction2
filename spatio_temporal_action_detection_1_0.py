@@ -34,13 +34,13 @@ import numpy as np
 import rospy
 import torch
 from cv_bridge import CvBridge
-from mmaction.registry import MODELS
-from mmaction.structures import ActionDataSample
+from face_and_person.msg import PersonBboxPerImage
 from mmengine.runner import load_checkpoint
 from mmengine.structures import InstanceData
-
-from face_and_person.msg import PersonBboxPerImage
 from STAD.msg import CurrentPersonActionPair, PersonActionPair, STADResult
+
+from mmaction.registry import MODELS
+from mmaction.structures import ActionDataSample
 
 # record video
 enable_record_video = False
@@ -299,6 +299,7 @@ class VideoMAE:
             current_person_bboxes_xyxy_and_ids = self.recv_msg_buffer_copy[-1][
                 "bboxes_xyxy_and_ids"
             ]
+            # print(current_person_bboxes_xyxy_and_ids)
             if len(current_person_bboxes_xyxy_and_ids) == 0:
                 ActionRecorder.action_info = {}
                 # ActionRecorder.record_counts += 1
@@ -378,10 +379,12 @@ class VideoMAE:
                         else:
                             prediction_one_person.remove(("坐", sit_score))
             # manage recorder
+            current_track_id_set = []
             for index, bbox_xyxy_and_id in enumerate(
                 current_person_bboxes_xyxy_and_ids
             ):
                 track_id = bbox_xyxy_and_id.track_id
+                current_track_id_set.append(track_id)
                 action_label = ""
                 for pred_result in prediction[index]:
                     action_label += pred_result[0]
@@ -424,6 +427,10 @@ class VideoMAE:
                         (ActionRecorder.action_info[track_id]["action"]).append(
                             action_label
                         )
+            # 在最后一张图像中没有的人，清空recoder关于这个人的cache
+            for track_id in list(ActionRecorder.action_info.keys()):
+                if track_id not in current_track_id_set:
+                    ActionRecorder.action_info.pop(track_id)
             # ActionRecorder.record_counts += 1
 
             # pub msg
